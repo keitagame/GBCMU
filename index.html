@@ -170,10 +170,11 @@ class Cartridge {
 
   read(addr) {
     addr &= 0xFFFF;
-    if (addr < 0x4000) return this.rom[addr] || 0;
+    if (addr < 0x4000) return addr < this.rom.length ? this.rom[addr] : 0xFF;
     if (addr < 0x8000) {
       const bank = this.romBank % this.numRomBanks;
-      return this.rom[(bank * 0x4000) + (addr - 0x4000)] || 0;
+      const off  = (bank * 0x4000) + (addr - 0x4000);
+      return off < this.rom.length ? this.rom[off] : 0xFF;
     }
     if (addr >= 0xA000 && addr < 0xC000) {
       if (!this.ramEnabled) return 0xFF;
@@ -196,6 +197,8 @@ class Cartridge {
       } else if (addr < 0x4000) {
         let b = val & 0x1F; if (b === 0) b = 1;
         this.romBank = (this.romBank & 0x60) | b;
+        // MBC1: banks 0x20,0x40,0x60 also map to +1
+        if (this.romBank === 0x20 || this.romBank === 0x40 || this.romBank === 0x60) this.romBank++;
       } else if (addr < 0x6000) {
         if (this.mode === 0) this.romBank = (this.romBank & 0x1F) | ((val & 0x03) << 5);
         else this.ramBank = val & 0x03;
@@ -399,8 +402,15 @@ class PPU {
   }
 
   _startHDMA(val) {
+    // Writing 0x80 with bit7=0 while HBlank DMA is active cancels it
+    if (!(val & 0x80) && this.hdmaActive) {
+      this.hdmaActive = false;
+      this.HDMA5 = val | 0x80; // bit7=1 means inactive/terminated
+      return;
+    }
+
     this.HDMA5 = val;
-    const src = ((this.HDMA1 << 8) | (this.HDMA2 & 0xF0));
+    const src = ((this.HDMA1 << 8) | (this.HDMA2 & 0xF0)) & 0xFFF0;
     const dst = 0x8000 | (((this.HDMA3 & 0x1F) << 8) | (this.HDMA4 & 0xF0));
     const len = ((val & 0x7F) + 1) * 16;
 
@@ -410,9 +420,10 @@ class PPU {
         this.vram[this.vbank][(dst + i) & 0x1FFF] = this.gb.mmu.read((src + i) & 0xFFFF);
       }
       this.hdmaActive = false;
+      this.HDMA5 = 0xFF; // completed
     } else {
-      // HBlank DMA — store state
-      this.hdmaSrc = src; this.hdmaDst = dst; this.hdmaLen = len;
+      // HBlank DMA — 16 bytes per HBlank
+      this.hdmaSrc = src; this.hdmaDst = dst & 0x1FFF; this.hdmaLen = len;
       this.hdmaActive = true;
     }
   }
@@ -422,8 +433,13 @@ class PPU {
     for (let i = 0; i < 16; i++) {
       this.vram[this.vbank][(this.hdmaDst + i) & 0x1FFF] = this.gb.mmu.read((this.hdmaSrc + i) & 0xFFFF);
     }
-    this.hdmaSrc += 16; this.hdmaDst += 16; this.hdmaLen -= 16;
-    if (this.hdmaLen <= 0) this.hdmaActive = false;
+    this.hdmaSrc = (this.hdmaSrc + 16) & 0xFFFF;
+    this.hdmaDst = (this.hdmaDst + 16) & 0x1FFF;
+    this.hdmaLen -= 16;
+    if (this.hdmaLen <= 0) {
+      this.hdmaActive = false;
+      this.HDMA5 = 0xFF;
+    }
   }
 
   doDMA(val) {
@@ -470,9 +486,12 @@ class PPU {
         if (this.cycles >= 456) {
           this.cycles -= 456;
           this.LY++;
+          if (this.LY > 153) {
+            this.LY = 0;
+          }
           this.checkLYC();
-          if (this.LY === 154) {
-            this.LY = 0; this.checkLYC(); this.setMode(2);
+          if (this.LY === 0) {
+            this.setMode(2);
             if (this.STAT & 0x20) this.gb.mmu.requestInterrupt(1);
           }
         }
@@ -1159,7 +1178,8 @@ class MMU {
     if (addr === 0xFF0F) return this.IF | 0xE0;
     if (addr >= 0xFF10 && addr < 0xFF40) return this.gb.apu.read(addr);
     if (addr >= 0xFF40 && addr <= 0xFF4B) return this.gb.ppu.read(addr);
-    if (addr === 0xFF4D) return this.KEY1 | (this.doubleSpeed ? 0x80 : 0); // GBC speed
+    if (addr === 0xFF4C) return this.gb.isGBC ? 0xFE : 0xFF; // KEY0: GBC mode indicator
+    if (addr === 0xFF4D) return (this.KEY1 & 0x01) | (this.doubleSpeed ? 0x80 : 0); // GBC speed
     if (addr === 0xFF4F) return this.gb.ppu.read(addr); // VRAM bank
     if (addr >= 0xFF51 && addr <= 0xFF55) return this.gb.ppu.read(addr); // HDMA
     if (addr === 0xFF70) return this.gb.isGBC ? this.wramBank : 0xFF; // GBC WRAM bank
@@ -1186,7 +1206,8 @@ class MMU {
     if (addr === 0xFF0F) { this.IF = val | 0xE0; return; }
     if (addr >= 0xFF10 && addr < 0xFF40) { this.gb.apu.write(addr, val); return; }
     if (addr >= 0xFF40 && addr <= 0xFF4B) { this.gb.ppu.write(addr, val); return; }
-    if (addr === 0xFF4D) { this.KEY1 = val; return; } // speed switch request
+    if (addr === 0xFF4C) { /* KEY0 - DMG compat mode flag, ignore */ return; }
+    if (addr === 0xFF4D) { this.KEY1 = (this.KEY1 & 0x80) | (val & 0x01); return; } // speed switch
     if (addr === 0xFF4F) { this.gb.ppu.write(addr, val); return; }
     if (addr >= 0xFF51 && addr <= 0xFF55) { this.gb.ppu.write(addr, val); return; }
     if (addr === 0xFF70 && this.gb.isGBC) {
@@ -1237,23 +1258,39 @@ class CPU {
   pop()   { const v=this.rw(this.SP); this.SP=(this.SP+2)&0xFFFF; return v; }
 
   step() {
-    if (this.IMESchedule > 0) { this.IMESchedule--; if (this.IMESchedule===0) this.IME=true; }
+    // IME enable delay: EI takes effect after next instruction
+    if (this.IMESchedule > 0) {
+      this.IMESchedule--;
+      if (this.IMESchedule === 0) this.IME = true;
+    }
+
     const irq = this.mmu.IE & this.mmu.IF & 0x1F;
-    if (irq) {
-      if (this.halted) this.halted = false;
-      if (this.IME) {
-        this.IME = false;
-        for (let i=0;i<5;i++) {
-          if (irq & (1<<i)) {
-            this.mmu.IF &= ~(1<<i);
-            this.push(this.PC);
-            this.PC = 0x0040 + i*8;
-            return 5;
-          }
+
+    // HALT: woken by any pending interrupt regardless of IME
+    if (this.halted) {
+      if (irq) {
+        this.halted = false;
+        // If IME=false, HALT ends but ISR is NOT called (CPU continues after HALT)
+        if (!this.IME) return 1;
+        // Fall through to ISR dispatch below
+      } else {
+        return 1; // still halted
+      }
+    }
+
+    // Interrupt service routine
+    if (irq && this.IME) {
+      this.IME = false;
+      for (let i = 0; i < 5; i++) {
+        if (irq & (1 << i)) {
+          this.mmu.IF &= ~(1 << i);
+          this.push(this.PC);
+          this.PC = 0x0040 + i * 8;
+          return 5; // 20 T-cycles
         }
       }
     }
-    if (this.halted) return 1;
+
     return this.dispatch(this.fetch());
   }
 
@@ -1317,7 +1354,15 @@ class CPU {
       case 0x28: { const e=(this.fetch()<<24)>>24; if(this.fZ) {this.PC=(this.PC+e)&0xFFFF; return 3;} return 2; }
       case 0x30: { const e=(this.fetch()<<24)>>24; if(!this.fC){this.PC=(this.PC+e)&0xFFFF; return 3;} return 2; }
       case 0x38: { const e=(this.fetch()<<24)>>24; if(this.fC) {this.PC=(this.PC+e)&0xFFFF; return 3;} return 2; }
-      case 0x10: this.fetch(); return 1; // STOP (ignore speed switch for simplicity)
+      case 0x10: {
+        this.fetch(); // skip next byte
+        // GBC speed switch: if KEY1 bit0 is set, toggle double speed
+        if (this.gb.isGBC && (this.mmu.KEY1 & 0x01)) {
+          this.mmu.doubleSpeed = !this.mmu.doubleSpeed;
+          this.mmu.KEY1 = this.mmu.doubleSpeed ? 0x80 : 0x00;
+        }
+        return 1;
+      }
       case 0x76: this.halted=true; return 1;
       case 0x27: this.daa(); return 1;
       case 0x2F: this.A=~this.A&0xFF; this.F=(this.F&0x90)|0x60; return 1;
@@ -1513,16 +1558,23 @@ class GameBoy {
     this.mmu.IF  = 0xE0;
     this.mmu.wramBank = 1;
 
-    this.ppu.LCDC = 0x91; this.ppu.STAT = 0x85;
+    this.ppu.LCDC = 0x91; this.ppu.STAT = 0x02;
     this.ppu.SCY  = 0; this.ppu.SCX  = 0;
     this.ppu.LY   = 0; this.ppu.LYC  = 0;
     this.ppu.WY   = 0; this.ppu.WX   = 0;
     this.ppu.BGP  = 0xFC; this.ppu.OBP0 = 0xFF; this.ppu.OBP1 = 0xFF;
     this.ppu.cycles = 0; this.ppu.mode = 2; this.ppu.windowLine = 0;
     this.ppu.vbank = 0;
-    // Init GBC palettes to white
+    this.ppu.vram[0].fill(0); this.ppu.vram[1].fill(0);
+    this.ppu.oam.fill(0);
+    this.ppu.hdmaActive = false; this.ppu.hdmaSrc = 0; this.ppu.hdmaDst = 0; this.ppu.hdmaLen = 0;
+    this.ppu.HDMA1 = 0xFF; this.ppu.HDMA2 = 0xFF; this.ppu.HDMA3 = 0xFF; this.ppu.HDMA4 = 0xFF;
+    this.ppu.HDMA5 = 0xFF;
+    this.ppu.bgPalIdx = 0; this.ppu.bgPalInc = false;
+    this.ppu.objPalIdx = 0; this.ppu.objPalInc = false;
+    // Init GBC palettes: default to white (0x7FFF per entry)
     this.ppu.bgPalData.fill(0xFF); this.ppu.objPalData.fill(0xFF);
-    for(let p=0;p<8;p++){this.ppu._parseBgPal(p);this.ppu._parseObjPal(p);}
+    for (let p = 0; p < 8; p++) { this.ppu._parseBgPal(p); this.ppu._parseObjPal(p); }
 
     this.cpu.A = gbc ? 0x11 : 0x01; this.cpu.F = gbc ? 0x80 : 0xB0;
     this.cpu.B = 0x00; this.cpu.C = gbc ? 0x00 : 0x13;
@@ -1538,13 +1590,16 @@ class GameBoy {
 
   stepFrame() {
     let cycles = 0;
-    while (cycles < FRAME_CYCLES) {
+    const target = FRAME_CYCLES; // always 70224 T-cycles of PPU/timer time
+    while (cycles < target) {
       const m = this.cpu.step();
-      const t = m * 4;
-      this.timer.step(t);
-      this.ppu.step(t);
-      this.apu.step(t);
-      cycles += t;
+      // In double speed: CPU opcodes take same M-cycles but T-cycles are halved for PPU/timer
+      const tPpu = m * 4; // T-cycles for PPU/timer (always at 4.19MHz)
+      const tCpu = this.mmu.doubleSpeed ? m * 2 : m * 4; // actual CPU T-cycles (unused here)
+      this.timer.step(tPpu);
+      this.ppu.step(tPpu);
+      this.apu.step(tPpu);
+      cycles += tPpu;
     }
     return this.ppu.framebuffer;
   }
