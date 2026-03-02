@@ -873,7 +873,7 @@ class APU {
     try {
       this.audioCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: this.sampleRate});
       this.gainNode = this.audioCtx.createGain();
-      this.gainNode.gain.value = 0.2;
+      this.gainNode.gain.value = 0.8;
       this.gainNode.connect(this.audioCtx.destination);
       this.nextTime = this.audioCtx.currentTime;
     } catch(e) {}
@@ -1648,8 +1648,8 @@ startBtn.addEventListener('click', () => {
 function loop() {
   if (!running || !gb) return;
 
-  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-  if (pads[0]) handlePad(pads[0]);
+  //const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  //if (pads[0]) handlePad(pads[0]);
 
   gb.stepFrame();
 
@@ -1665,16 +1665,11 @@ function loop() {
 
   pcEl.textContent = '0x' + gb.cpu.PC.toString(16).padStart(4,'0');
 
-  frames++;
-  const now = performance.now();
-  if (now - lastFpsTime >= 1000) {
-    document.title = `GB — ${frames} fps`;
-    frames = 0; lastFpsTime = now;
-  }
+  
 
   recCtx.clearRect(0,0,recCanvas.width,recCanvas.height);
   recCtx.drawImage(canvas,0,0,SCREEN_W,SCREEN_H,0,0,recCanvas.width,recCanvas.height);
-
+//setTimeout(loop);
   animId = requestAnimationFrame(loop);
 }
 
