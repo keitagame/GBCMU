@@ -88,6 +88,9 @@ border:1px solid rgb(255, 255, 255);
       
       <span style="display:none" id="file-name"></span>
       <button id="fullscreenBtn">Fullscreen</button>
+      <button id="saveBtn">Save</button>
+<button id="loadBtn">Load</button>
+<button id="rewBtn">Rewind</button>
       <button id="start">Start</button>
       <div class="mono" id="status" style="display:none">No ROM</div>
       <div><span class="mono">CPU PC:</span> <span id="pc" class="mono">0x0000</span></div>
@@ -102,7 +105,9 @@ border:1px solid rgb(255, 255, 255);
 // ============================================================
 //  Game Boy / Game Boy Color Emulator — Full Implementation
 // ============================================================
-
+let rewindBuffer=[];
+const REWIND_FRAMES=300; // 約5秒(60fps)
+let rewinding=false;
 const SCREEN_W = 160;
 const SCREEN_H = 144;
 const GB_FREQ   = 4194304;
@@ -1724,7 +1729,87 @@ class GameBoy {
     this.apu.initAudio();
     return this.cart.title;
   }
+saveState() {
+return {
+cpu: {
+A:this.cpu.A,F:this.cpu.F,
+B:this.cpu.B,C:this.cpu.C,
+D:this.cpu.D,E:this.cpu.E,
+H:this.cpu.H,L:this.cpu.L,
+SP:this.cpu.SP,
+PC:this.cpu.PC,
+IME:this.cpu.IME,
+halted:this.cpu.halted
+},
 
+mmu: {
+wram:[...this.mmu.wram],
+hram:[...this.mmu.hram],
+IE:this.mmu.IE,
+IF:this.mmu.IF,
+wramBank:this.mmu.wramBank
+},
+
+ppu: {
+vram0:[...this.ppu.vram[0]],
+vram1:[...this.ppu.vram[1]],
+oam:[...this.ppu.oam],
+LCDC:this.ppu.LCDC,
+STAT:this.ppu.STAT,
+SCX:this.ppu.SCX,
+SCY:this.ppu.SCY,
+LY:this.ppu.LY,
+LYC:this.ppu.LYC,
+WX:this.ppu.WX,
+WY:this.ppu.WY,
+BGP:this.ppu.BGP,
+OBP0:this.ppu.OBP0,
+OBP1:this.ppu.OBP1
+},
+
+timer:{
+DIV:this.timer.DIV,
+TIMA:this.timer.TIMA,
+TMA:this.timer.TMA,
+TAC:this.timer.TAC
+},
+
+cartRam:[...this.cart.ram]
+};
+}
+loadState(s){
+
+Object.assign(this.cpu,s.cpu);
+
+this.mmu.wram.set(s.mmu.wram);
+this.mmu.hram.set(s.mmu.hram);
+this.mmu.IE=s.mmu.IE;
+this.mmu.IF=s.mmu.IF;
+this.mmu.wramBank=s.mmu.wramBank;
+
+this.ppu.vram[0].set(s.ppu.vram0);
+this.ppu.vram[1].set(s.ppu.vram1);
+this.ppu.oam.set(s.ppu.oam);
+
+Object.assign(this.ppu,{
+LCDC:s.ppu.LCDC,
+STAT:s.ppu.STAT,
+SCX:s.ppu.SCX,
+SCY:s.ppu.SCY,
+LY:s.ppu.LY,
+LYC:s.ppu.LYC,
+WX:s.ppu.WX,
+WY:s.ppu.WY,
+BGP:s.ppu.BGP,
+OBP0:s.ppu.OBP0,
+OBP1:s.ppu.OBP1
+});
+
+Object.assign(this.timer,s.timer);
+
+this.cart.ram.set(s.cartRam);
+
+}
   reset() {
     // GBC post-boot state differences
     const gbc = this.isGBC;
@@ -1775,6 +1860,17 @@ this.cpu.PC = 0x0000;
   }
 
   stepFrame() {
+    if(!rewinding){
+
+rewindBuffer.push(
+structuredClone(gb.saveState())
+);
+
+if(rewindBuffer.length>REWIND_FRAMES){
+rewindBuffer.shift();
+}
+
+}
     let cycles = 0;
     const target = FRAME_CYCLES; // always 70224 T-cycles of PPU/timer time
     while (cycles < target) {
@@ -1790,7 +1886,21 @@ this.cpu.PC = 0x0000;
     return this.ppu.framebuffer;
   }
 }
+document.addEventListener("keydown",e=>{
 
+if(e.code==="KeyR"){
+rewinding=true;
+}
+
+});
+
+document.addEventListener("keyup",e=>{
+
+if(e.code==="KeyR"){
+rewinding=false;
+}
+
+});
 // ============================================================
 //  UI
 // ============================================================
@@ -1833,11 +1943,21 @@ startBtn.addEventListener('click', () => {
 
 function loop() {
   if (!running || !gb) return;
+if(rewinding && rewindBuffer.length){
 
+gb.loadState(
+rewindBuffer.pop()
+);
+
+}else{
+
+gb.stepFrame();
+
+}
   //const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   //if (pads[0]) handlePad(pads[0]);
 
-  gb.stepFrame();
+  //gb.stepFrame();
 
   const fb = gb.ppu.framebuffer, dat = imageData.data;
   for (let i = 0; i < SCREEN_W * SCREEN_H; i++) {
@@ -1901,24 +2021,22 @@ fullscreenBtn.addEventListener('click', () => {
 });
 
 function startRecording() {
-  if (recording) return;
-  const stream = recCanvas.captureStream(60);
-  recorder = new MediaRecorder(stream, {mimeType:'video/webm;codecs=vp9', videoBitsPerSecond:10_000_000});
-  recChunks = [];
-  recorder.ondataavailable = e => { if(e.data.size>0) recChunks.push(e.data); };
-  recorder.onstop = () => {
-    const blob = new Blob(recChunks, {type:'video/webm'});
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href=url; a.download='gb.webm'; a.click();
-    URL.revokeObjectURL(url);
-  };
-  recorder.start(); recording = true;
+  
 }
 function stopRecording() {
-  if (!recording||!recorder) return;
-  recorder.stop(); recording=false; recorder=null;
+
 }
+saveBtn.onclick=()=>{
+localStorage.setItem(
+"gb-save",
+JSON.stringify(gb.saveState())
+);
+};
+
+loadBtn.onclick=()=>{
+const s=localStorage.getItem("gb-save");
+if(s) gb.loadState(JSON.parse(s));
+};
     </script>
   </body>
 </html>
